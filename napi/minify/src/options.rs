@@ -143,6 +143,23 @@ pub struct CompressOptions {
     /// Limit the maximum number of iterations for debugging purpose.
     pub max_iterations: Option<u8>,
 
+    /// Limit the maximum number of expressions that `sequences` will
+    /// join into a single comma expression.
+    ///
+    /// When set to `n`, a chain `a; b; c; ...` will stop being joined
+    /// once the combined sequence reaches `n` expressions; the rest
+    /// stay as separate statements. A very long run of statements
+    /// will be split across several shorter sequences automatically.
+    ///
+    /// Useful for shipping to engines that evaluate very long comma
+    /// expressions poorly. Firefox (SpiderMonkey) is known to throw
+    /// `InternalError: too much recursion` at runtime for chains that
+    /// exceed a few hundred expressions when they appear inside a
+    /// deep call stack (e.g. React render).
+    ///
+    /// @default undefined (no cap)
+    pub sequences_max_length: Option<u32>,
+
     /// Treeshake options.
     pub treeshake: Option<TreeShakeOptions>,
 }
@@ -181,6 +198,7 @@ impl TryFrom<&CompressOptions> for oxc_minifier::CompressOptions {
                 .map(|labels| labels.iter().cloned().collect())
                 .unwrap_or_default(),
             max_iterations: o.max_iterations,
+            sequences_max_length: o.sequences_max_length,
         })
     }
 }

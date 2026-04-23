@@ -102,14 +102,28 @@ impl<'a> PeepholeOptimizations {
                     let prev_index = stmts.len() - 2;
                     let prev_stmt = &stmts[prev_index];
                     match prev_stmt {
-                        Statement::ExpressionStatement(_) => {
+                        Statement::ExpressionStatement(prev_expr_stmt_ref) => {
                             if let Some(Statement::ReturnStatement(last_return)) = stmts.last()
                                 && last_return.argument.is_none()
                             {
                                 break 'return_loop;
                             }
+                            // "a(); return b;" => "return a(), b;", but only if
+                            // the combined sequence length stays within
+                            // `sequences_max_length`. When it would exceed the
+                            // cap, leave the two statements as they are — the
+                            // chain naturally splits here.
+                            if let Some(Statement::ReturnStatement(last_return_ref)) = stmts.last()
+                                && let Some(b_ref) = last_return_ref.argument.as_ref()
+                                && Self::would_exceed_sequence_cap(
+                                    &prev_expr_stmt_ref.expression,
+                                    b_ref,
+                                    ctx,
+                                )
+                            {
+                                break 'return_loop;
+                            }
                             ctx.state.changed = true;
-                            // "a(); return b;" => "return a(), b;"
                             let last_stmt = stmts.pop().unwrap();
                             let Statement::ReturnStatement(mut last_return) = last_stmt else {
                                 unreachable!()
@@ -204,9 +218,20 @@ impl<'a> PeepholeOptimizations {
                     let prev_index = stmts.len() - 2;
                     let prev_stmt = &stmts[prev_index];
                     match prev_stmt {
-                        Statement::ExpressionStatement(_) => {
+                        Statement::ExpressionStatement(prev_expr_stmt_ref) => {
+                            // "a(); throw b;" => "throw a(), b;", but only if
+                            // the combined sequence stays within
+                            // `sequences_max_length`.
+                            if let Some(Statement::ThrowStatement(last_throw_ref)) = stmts.last()
+                                && Self::would_exceed_sequence_cap(
+                                    &prev_expr_stmt_ref.expression,
+                                    &last_throw_ref.argument,
+                                    ctx,
+                                )
+                            {
+                                break 'throw_loop;
+                            }
                             ctx.state.changed = true;
-                            // "a(); throw b;" => "throw a(), b;"
                             let last_stmt = stmts.pop().unwrap();
                             let Statement::ThrowStatement(mut last_throw) = last_stmt else {
                                 unreachable!()
@@ -369,6 +394,31 @@ impl<'a> PeepholeOptimizations {
         ctx.ast.expression_sequence(span, exprs)
     }
 
+    /// Returns `true` if joining `a` and `b` into a single sequence would
+    /// produce a comma-expression chain longer than
+    /// [`CompressOptions::sequences_max_length`]. When `sequences_max_length`
+    /// is `None`, this always returns `false`.
+    ///
+    /// Call sites use this as a precondition guard before attempting the
+    /// `sequences` optimization — if it returns `true`, leave the two
+    /// expressions as separate statements (or skip the absorb-into-if /
+    /// absorb-into-switch / etc. transformation). Because the minifier
+    /// walks statements left-to-right, a very long chain naturally splits
+    /// into several shorter chains: once the cap is hit, the next
+    /// statement starts a fresh sequence.
+    fn would_exceed_sequence_cap(
+        a: &Expression<'a>,
+        b: &Expression<'a>,
+        ctx: &TraverseCtx<'a>,
+    ) -> bool {
+        let Some(max) = ctx.options().sequences_max_length else { return false };
+        let len_of = |expr: &Expression<'a>| -> usize {
+            if let Expression::SequenceExpression(s) = expr { s.expressions.len() } else { 1 }
+        };
+        // u64 to avoid any overflow risk when lengths are near usize::MAX.
+        (len_of(a) as u64) + (len_of(b) as u64) > u64::from(max)
+    }
+
     fn jump_stmts_look_the_same(left: &Statement<'a>, right: &Statement<'a>) -> bool {
         if left.is_jump_statement() && right.is_jump_statement() {
             return left.content_eq(right);
@@ -491,6 +541,11 @@ impl<'a> PeepholeOptimizations {
 
         if ctx.options().sequences
             && let Some(Statement::ExpressionStatement(prev_expr_stmt)) = result.last_mut()
+            && !Self::would_exceed_sequence_cap(
+                &prev_expr_stmt.expression,
+                &expr_stmt.expression,
+                ctx,
+            )
         {
             let a = &mut prev_expr_stmt.expression;
             let b = &mut expr_stmt.expression;
@@ -619,6 +674,11 @@ impl<'a> PeepholeOptimizations {
 
         if ctx.options().sequences
             && let Some(Statement::ExpressionStatement(prev_expr_stmt)) = result.last_mut()
+            && !Self::would_exceed_sequence_cap(
+                &prev_expr_stmt.expression,
+                &switch_stmt.discriminant,
+                ctx,
+            )
         {
             let a = &mut prev_expr_stmt.expression;
             let b = &mut switch_stmt.discriminant;
@@ -676,7 +736,9 @@ impl<'a> PeepholeOptimizations {
 
         // Absorb a previous expression statement
         if ctx.options().sequences {
-            if let Some(Statement::ExpressionStatement(prev_expr_stmt)) = result.last_mut() {
+            if let Some(Statement::ExpressionStatement(prev_expr_stmt)) = result.last_mut()
+                && !Self::would_exceed_sequence_cap(&prev_expr_stmt.expression, &if_stmt.test, ctx)
+            {
                 let a = &mut prev_expr_stmt.expression;
                 let b = &mut if_stmt.test;
                 if_stmt.test = Self::join_sequence(a, b, ctx);
@@ -842,6 +904,7 @@ impl<'a> PeepholeOptimizations {
             if argument.may_have_side_effects(ctx) {
                 if ctx.options().sequences
                     && let Some(Statement::ExpressionStatement(prev_expr_stmt)) = result.last_mut()
+                    && !Self::would_exceed_sequence_cap(&prev_expr_stmt.expression, argument, ctx)
                 {
                     let a = &mut prev_expr_stmt.expression;
                     prev_expr_stmt.expression = Self::join_sequence(a, argument, ctx);
@@ -860,6 +923,7 @@ impl<'a> PeepholeOptimizations {
         if ctx.options().sequences
             && let Some(Statement::ExpressionStatement(prev_expr_stmt)) = result.last_mut()
             && let Some(argument) = &mut ret_stmt.argument
+            && !Self::would_exceed_sequence_cap(&prev_expr_stmt.expression, argument, ctx)
         {
             let a = &mut prev_expr_stmt.expression;
             *argument = Self::join_sequence(a, argument, ctx);
@@ -889,6 +953,11 @@ impl<'a> PeepholeOptimizations {
 
         if ctx.options().sequences
             && let Some(Statement::ExpressionStatement(prev_expr_stmt)) = result.last_mut()
+            && !Self::would_exceed_sequence_cap(
+                &prev_expr_stmt.expression,
+                &throw_stmt.argument,
+                ctx,
+            )
         {
             let a = &mut prev_expr_stmt.expression;
             let b = &mut throw_stmt.argument;
@@ -960,7 +1029,13 @@ impl<'a> PeepholeOptimizations {
             match result.last_mut() {
                 Some(Statement::ExpressionStatement(prev_expr_stmt)) => {
                     if let Some(init) = &mut for_stmt.init {
-                        if let Some(init) = init.as_expression_mut() {
+                        if let Some(init) = init.as_expression_mut()
+                            && !Self::would_exceed_sequence_cap(
+                                &prev_expr_stmt.expression,
+                                init,
+                                ctx,
+                            )
+                        {
                             let a = &mut prev_expr_stmt.expression;
                             *init = Self::join_sequence(a, init, ctx);
                             result.pop();
@@ -1055,7 +1130,14 @@ impl<'a> PeepholeOptimizations {
                     // the shadowed for-in variable instead.
                     // See: https://github.com/oxc-project/oxc/issues/18650
                     let is_block_scoped = matches!(&for_in_stmt.left, ForStatementLeft::VariableDeclaration(var_decl) if !var_decl.kind.is_var());
-                    if !has_side_effectful_initializer && !is_block_scoped {
+                    if !has_side_effectful_initializer
+                        && !is_block_scoped
+                        && !Self::would_exceed_sequence_cap(
+                            &prev_expr_stmt.expression,
+                            &for_in_stmt.right,
+                            ctx,
+                        )
+                    {
                         let a = &mut prev_expr_stmt.expression;
                         for_in_stmt.right = Self::join_sequence(a, &mut for_in_stmt.right, ctx);
                         result.pop();

@@ -54,6 +54,25 @@ pub struct CompressOptions {
 
     /// Limit the maximum number of iterations for debugging purpose.
     pub max_iterations: Option<u8>,
+
+    /// Limit the maximum number of expressions that `sequences` will join
+    /// into a single comma expression.
+    ///
+    /// When `Some(n)`, joining `a; b; c; ...` stops once the combined
+    /// sequence reaches `n` expressions; the remaining statements stay
+    /// as separate statements. A long chain is split into several smaller
+    /// sequences automatically — no explicit splitting logic is needed
+    /// because the minifier walks statements left-to-right and each
+    /// new statement starts a fresh chain once the previous one is capped.
+    ///
+    /// Useful when shipping to engines that evaluate very long comma
+    /// expressions poorly. Firefox (SpiderMonkey) is known to throw
+    /// `InternalError: too much recursion` at runtime for chains that
+    /// exceed a few hundred expressions when they appear inside a deep
+    /// call stack (e.g. React render).
+    ///
+    /// Default `None` (no limit).
+    pub sequences_max_length: Option<u32>,
 }
 
 impl Default for CompressOptions {
@@ -75,6 +94,7 @@ impl CompressOptions {
             treeshake: TreeShakeOptions::default(),
             drop_labels: FxHashSet::default(),
             max_iterations: None,
+            sequences_max_length: None,
         }
     }
 
@@ -90,6 +110,7 @@ impl CompressOptions {
             treeshake: TreeShakeOptions::default(),
             drop_labels: FxHashSet::default(),
             max_iterations: None,
+            sequences_max_length: None,
         }
     }
 
@@ -105,6 +126,7 @@ impl CompressOptions {
             treeshake: TreeShakeOptions::default(),
             drop_labels: FxHashSet::default(),
             max_iterations: None,
+            sequences_max_length: None,
         }
     }
 }
